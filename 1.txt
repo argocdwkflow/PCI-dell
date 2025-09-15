@@ -1,0 +1,91 @@
+Sur un serveur physique Dell R740, tu peux vérifier depuis l’OS Linux si une carte PCI est bien reconnue dans le bon slot et détecter une éventuelle erreur de câblage (ex : carte branchée sur slot 1 mais attendue sur slot 2).
+Voici les commandes utiles côté ligne de commande Linux :
+
+
+---
+
+1. Lister les périphériques PCI
+
+lspci -tv
+
+Affiche l’arborescence des périphériques PCI par bus/slot.
+Tu peux repérer la carte et voir sur quel Bus/Device/Function elle est branchée.
+
+
+---
+
+2. Afficher le détail d’un périphérique
+
+lspci -s <bus:device.function> -vv
+
+Exemple :
+
+lspci -s 3b:00.0 -vv
+
+
+---
+
+3. Identifier la correspondance avec le slot physique
+
+dmidecode -t slot
+
+Cela liste les slots PCI du serveur avec leurs descriptions Dell (Slot 1, Slot 2, x16, x8, etc.), et indique si le slot est Remplis ou Vide.
+
+
+---
+
+4. Associer périphérique ↔ slot
+
+Tu peux corréler via sysfs :
+
+ls -l /sys/bus/pci/slots/
+
+et
+
+cat /sys/bus/pci/slots/*/address
+
+Chaque entrée indique quel device PCI est branché sur le slot.
+
+
+---
+
+5. Vérifier côté Dell
+
+Avec Dell OpenManage (omreport) si installé :
+
+omreport chassis slots
+
+ou
+
+omreport chassis pci
+
+Cela te donne directement les cartes insérées et les slots physiques.
+
+
+---
+
+✅ Procédure typique pour vérifier une erreur de câblage :
+
+1. dmidecode -t slot → voir la description des slots physiques.
+
+
+2. lspci -tv → identifier la carte et son bus/slot logique.
+
+
+3. Vérifier la correspondance dans /sys/bus/pci/slots/.
+
+
+4. Avec OpenManage (omreport chassis slots) si dispo → confirmation Dell.
+
+
+
+
+---
+
+Veux-tu que je t’écrive une suite de commandes à exécuter pas à pas qui te donne directement :
+
+la liste des slots PCI de ton R740,
+
+et la carte détectée dans chaque slot ?
+
+
