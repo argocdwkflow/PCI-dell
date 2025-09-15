@@ -1,0 +1,76 @@
+Parfait 👍 Voici une suite de commandes pas à pas que tu peux lancer sur ton Dell R740 pour voir si une carte est bien dans le bon slot PCI et détecter une erreur de câblage.
+
+
+---
+
+1. Afficher les slots PCI physiques connus par le BIOS/DMI
+
+sudo dmidecode -t slot | egrep -i "Designation|Bus Address|ID|Status"
+
+👉 Ça liste les slots physiques (Slot 1, Slot 2, …), avec l’état Available / In Use et parfois l’adresse PCI attendue.
+
+
+---
+
+2. Voir quels périphériques PCI sont détectés par Linux
+
+lspci -tv
+
+👉 Tu verras l’arborescence PCI avec le Bus:Device.Function (exemple : 3b:00.0).
+
+
+---
+
+3. Faire correspondre slot ↔ périphérique
+
+Chaque slot PCI est représenté dans /sys/bus/pci/slots/.
+
+ls -l /sys/bus/pci/slots/
+
+Puis, pour chaque slot :
+
+cat /sys/bus/pci/slots/*/address
+
+👉 Ça affiche l’adresse PCI associée au slot physique.
+
+
+---
+
+4. Identifier la carte installée dans un slot donné
+
+Exemple pour le slot 3b:00.0 :
+
+lspci -s 3b:00.0 -vv
+
+👉 Tu sauras quelle carte (ex : NIC, HBA, GPU…) est branchée.
+
+
+---
+
+5. Vérification avec Dell OpenManage (si installé)
+
+Très pratique car ça donne directement la correspondance :
+
+omreport chassis slots
+
+ou
+
+omreport chassis pci
+
+👉 Tu vois : Slot 1 → Broadcom NIC, Slot 2 → HBA, etc.
+
+
+---
+
+✅ Exemple de séquence complète :
+
+sudo dmidecode -t slot | grep -A3 "Designation"
+lspci -tv
+ls -l /sys/bus/pci/slots/
+for s in /sys/bus/pci/slots/*; do echo "$s -> $(cat $s/address)"; done
+
+
+---
+
+Veux-tu que je te prépare un script shell prêt à exécuter qui te sort un tableau : Slot physique ↔ adresse PCI ↔ carte détectée ?
+
