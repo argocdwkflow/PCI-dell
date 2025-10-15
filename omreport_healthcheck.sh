@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# ------------------------------------------------------------
+# Dell R740 - OMSA healthcheck (CLI omreport)
+# RHEL 8/9 - nécessite srvadmin-{base,services,...}
+# ------------------------------------------------------------
+# Sorties:
+#  - /var/log/omreport_health/<host>_YYYYmmdd_HHMM.txt
+#  - /var/log/omreport_health/<host>_YYYYmmdd_HHMM.csv
+# Codes de sortie: 0=OK, 1=Warning détecté, 2=Critical/erreur
+# ------------------------------------------------------------
+
+set -u
+umask 027
+
+OMREPORT="/opt/dell/srvadmin/bin/omreport"
+HOST="$(hostname -s)"
+TS="$(date +%Y%m%d_%H%M)"
+OUTDIR="/var/log/omreport_health"
+TXT="${OUTDIR}/${HOST}_${TS}.txt"
+CSV="${OUTDIR}/${HOST}_${TS}.csv"
+
+# [Optionnel] destinataire e-mail (laisser vide pour désactiver)
+MAIL_TO="${MAIL_TO:-}"      # ex: "ops@example.com"
+MAIL_SUBJECT="[${HOST}] OMSA Healthcheck ${TS}"
+
+mkdir -p "${OUTDIR}"
+
+# Compteurs severité
+CRIT=0
+WARN=0
+INFO=0
+
+# Helpers -----------------------------------------------------
+log()  { echo -e "$*" | tee -a "${TXT}" >/dev/null; }
+csv()  { echo "$*" >> "${CSV}"; }
+bar()  { printf -- '%.0s-' {1..80} | tee -a "${TXT}" >/dev/null; echo | tee -a "${TXT}" >/dev/null; }
+hdr()  { bar; log "### $*"; bar; }
+
+have_omsa() {
+  if [[ ! -x "${OMREPORT}" ]]; then
+    echo "ERREUR: ${OMREPORT} introuvable. Installez OMSA (srvadmin-all) et activez 'dataeng'." | tee -a "${TXT}" >&2
+    exit 2
+  fi
+  if ! systemctl is-active --quiet dataeng; then
+    echo "ERREUR: service 'dataeng' inactif. Lancez: systemctl enable --now dataeng" | tee -a "${TXT}" >&2
+    exit 2
+  fi
+}
+
+# Normalise un statut textuel vers OK/WARNING/CRITICAL/UNKNOWN
+normalize_status() {
+  local s="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$s" in
+    *critical*|*failed*|*degraded*|*fault*|*nonrecoverable*|*not present*|*missing*)
+      echo "CRITICAL";;
+    *non-critical*|*warning*|*degraded?*|*predictive failure*|*recoverable*)
+      echo "WARNING";;
+    *ok*|*ready*|*present*|*on*|*up*)
+      echo "OK";;
+    *)
+      echo "UNKNOWN";;
+  esac
+}
+
+bump_counters() {
+  case "$1" in
+    CRITICAL) ((CRIT++));;
+    WARNING)  ((WARN++));;
+    OK|UNKNOWN) ((INFO++));;
+  esac
+}
+
+# Scrute une commande omreport, imprime, et extrait les lignes d'état en CSV
+run_section() {
+  local section="$1"; shift
+  local cmd=("$@")
+  hdr "${section}"
+  {
+    echo "\$ ${cmd[*]}"
+    "${cmd[@]}"
+  } >> "${TXT}" 2>&1
+
+  # Parse des lignes contenant Status/State/Link
+  # On étiquette chaque ligne avec la section pour le CSV
+  "${cmd[@]}" 2>/dev/null | awk -v SEC="${section}" '
+    BEGIN{IGNORECASE=1}
+    /(^|\s)(Status|State|Link Status|Redundancy|Health)\s*:/ {
+      # Fusionne la ligne "clé : valeur"
+      key=$0
+      # Nettoyage
+      gsub(/^[ \t]+/, "", key)
+      gsub(/[ \t]+$/, "", key)
+      split(key, a, ":")
+      k=a[1]; sub(/[ \t]+$/, "", k)
+      v=substr(key, index(key, ":")+1); gsub(/^[ \t]+/, "", v)
+      printf("%s;%s;%s\n", SEC, k, v)
+    }
+  ' | while IFS=';' read -r SEC K V; do
+        # Normalise une severité à partir de la valeur
+        S="$(normalize_status "$V")"
+        bump_counters "$S"
+        csv "${HOST},${SEC},${K},${S},${V}"
+     done
+}
+
+# Init fichiers
+echo "# OMSA Healthcheck - Host=${HOST} - TS=${TS}" > "${TXT}"
+echo "host,section,key,severity,value" > "${CSV}"
+
+have_omsa
+
+# Collecte ----------------------------------------------------
+
+# 1. System / Chassis
+run_section "System Summary"     "${OMREPORT}" system summary
+run_section "Chassis Overview"   "${OMREPORT}" chassis
+run_section "Chassis Temps"      "${OMREPORT}" chassis temps
+run_section "Chassis Fans"       "${OMREPORT}" chassis fans
+run_section "Power Supplies"     "${OMREPORT}" chassis pwrsupplies
+run_section "Power/Voltages"     "${OMREPORT}" chassis voltages
+run_section "Power/Amperage"     "${OMREPORT}" chassis amperage
+run_section "Power/Consumption"  "${OMREPORT}" chassis power
+run_section "Chassis Intrusion"  "${OMREPORT}" chassis intrusion
+run_section "Chassis Battery"    "${OMREPORT}" chassis battery
+run_section "NICs"               "${OMREPORT}" chassis nic
+
+# 2. Storage (controllers, vdisks, pdisks)
+hdr "Storage Controllers"
+"${OMREPORT}" storage controller >> "${TXT}" 2>&1
+mapfile -t CTRLS < <("${OMREPORT}" storage controller 2>/dev/null | awk '/^ID\s*:/ {print $3}')
+if ((${#CTRLS[@]}==0)); then
+  csv "${HOST},Storage,Controller,UNKNOWN,No controller detected"
+  ((WARN++))
+else
+  for c in "${CTRLS[@]}"; do
+    run_section "Storage C${c} VDisks" "${OMREPORT}" storage vdisk controller="${c}"
+    run_section "Storage C${c} PDisks" "${OMREPORT}" storage pdisk controller="${c}"
+  done
+fi
+
+# 3. Derniers événements (alertlog)
+hdr "Alert Log (derniers 200)"
+{ echo "\$ ${OMREPORT} system alertlog"; "${OMREPORT}" system alertlog | tail -200; } >> "${TXT}" 2>&1
+
+# Récap -------------------------------------------------------
+hdr "SYNTHÈSE"
+log "CRITICAL: ${CRIT} | WARNING: ${WARN} | OK/UNKNOWN: ${INFO}"
+bar
+log "Rapports:"
+log " - TXT : ${TXT}"
+log " - CSV : ${CSV}"
+bar
+
+# E-mail optionnel -------------------------------------------
+if [[ -n "${MAIL_TO}" ]]; then
+  if command -v mail >/dev/null 2>&1; then
+    cat "${TXT}" | mail -s "${MAIL_SUBJECT}" "${MAIL_TO}" || true
+  elif command -v sendmail >/dev/null 2>&1; then
+    {
+      echo "Subject: ${MAIL_SUBJECT}"
+      echo "To: ${MAIL_TO}"
+      echo "Content-Type: text/plain; charset=UTF-8"
+      echo
+      cat "${TXT}"
+    } | sendmail -t || true
+  else
+    log "INFO: ni 'mail' ni 'sendmail' trouvés, envoi e-mail ignoré."
+  fi
+fi
+
+# Code de retour selon la pire sévérité trouvée
+if ((CRIT>0));   then exit 2
+elif ((WARN>0)); then exit 1
+else                 exit 0
+fi
